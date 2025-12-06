@@ -111,27 +111,120 @@ void commandSetPositionLimits(byte id, uint16_t min, uint16_t max) {
   commandSetMaxPosition(id, max);
 }
 
-uint16_t readPosition(byte id) {
-  byte data[2] = {ADDR_POS_CALIB_L, 0x02};  // Dirección y longitud
-  byte packet[9];  // 7 + 2
+// Función auxiliar para validar checksum de respuesta
+bool validateChecksum(const byte* packet, byte packetSize) {
+  if (packetSize < 7) return false;
+  
+  byte chksum1 = 0;
+  for (int i = 2; i < packetSize; i++) {
+    chksum1 ^= packet[i];
+  }
+  chksum1 &= 0xFE;
+  
+  byte chksum2 = (~chksum1) & 0xFE;
+  
+  return (packet[5] == chksum1 && packet[6] == chksum2);
+}
 
+// Lee respuesta del servo con sincronización y validación
+// Retorna número de bytes leídos, o -1 en caso de error
+int readResponse(byte* buffer, int maxSize, unsigned long timeout_ms) {
+  unsigned long startTime = millis();
+  int pos = 0;
+  
+  // Buscar header 0xFF 0xFF
+  while ((millis() - startTime) < timeout_ms) {
+    if (Serial1.available() > 0) {
+      byte b = Serial1.read();
+      
+      if (pos == 0 && b == 0xFF) {
+        buffer[pos++] = b;
+      } else if (pos == 1 && b == 0xFF) {
+        buffer[pos++] = b;
+      } else if (pos >= 2) {
+        buffer[pos++] = b;
+        
+        // Si ya tenemos el tamaño del paquete
+        if (pos >= 3) {
+          byte packetSize = buffer[2];
+          if (packetSize > maxSize) {
+            return -1;  // Paquete demasiado grande
+          }
+          
+          // Esperar el resto del paquete
+          while (pos < packetSize && (millis() - startTime) < timeout_ms) {
+            if (Serial1.available() > 0) {
+              buffer[pos++] = Serial1.read();
+            }
+          }
+          
+          if (pos == packetSize) {
+            // Validar checksum
+            if (validateChecksum(buffer, packetSize)) {
+              return pos;
+            } else {
+              return -1;  // Checksum inválido
+            }
+          }
+        }
+      } else {
+        pos = 0;  // Reset si no encontramos header
+      }
+    }
+  }
+  
+  return -1;  // Timeout
+}
+
+// Lee un registro de RAM de 1 byte
+bool readRAMByte(byte id, byte address, byte& value) {
+  byte data[2] = {address, 0x01};  // Dirección y longitud
+  byte packet[9];
+  
   buildPacket(packet, id, CMD_RAM_READ, data, 2);
   Serial1.write(packet, packet[2]);
+  delay(HERKULEX_RESPONSE_DELAY_MS);
+  
+  byte response[16];
+  int len = readResponse(response, sizeof(response), HERKULEX_ACK_TIMEOUT_MS);
+  
+  if (len >= 11 && response[4] == ACK_RAM_READ) {
+    // Estructura: [FF][FF][LEN][ID][CMD][CHK1][CHK2][ADDR][NBYTES][DATA][STATUS_ERROR][STATUS_DETAIL]
+    value = response[9];
+    return true;
+  }
+  
+  return false;
+}
 
-  delay(5);  // Espera corta
+// Lee un registro de RAM de 2 bytes (Little Endian)
+bool readRAMWord(byte id, byte address, uint16_t& value) {
+  byte data[2] = {address, 0x02};  // Dirección y longitud
+  byte packet[9];
+  
+  buildPacket(packet, id, CMD_RAM_READ, data, 2);
+  Serial1.write(packet, packet[2]);
+  delay(HERKULEX_RESPONSE_DELAY_MS);
+  
+  byte response[16];
+  int len = readResponse(response, sizeof(response), HERKULEX_ACK_TIMEOUT_MS);
+  
+  if (len >= 12 && response[4] == ACK_RAM_READ) {
+    // Estructura: [FF][FF][LEN][ID][CMD][CHK1][CHK2][ADDR][NBYTES][DATA_LSB][DATA_MSB][STATUS_ERROR][STATUS_DETAIL]
+    value = response[9] | (response[10] << 8);
+    return true;
+  }
+  
+  return false;
+}
 
-  int timeout = 1000;
-  while (Serial1.available() < 13 && timeout-- > 0) delay(1);
-
-  if (Serial1.available() >= 13) {
-    byte respuesta[13];
-    for (int i = 0; i < 13; i++) respuesta[i] = Serial1.read();
-
-    uint16_t pos = respuesta[9] | (respuesta[10] << 8);
+// Lee posición calibrada actual
+uint16_t readPosition(byte id) {
+  uint16_t pos = 0xFFFF;
+  if (readRAMWord(id, ADDR_POS_CALIB_L, pos)) {
     return pos;
   }
-
-  return 0xFFFF; // Error
+  return 0xFFFF;  // Error
 }
 
 bool herkulex_readStatus(byte id, byte& statusError, byte& detailError) {
@@ -199,18 +292,101 @@ void printHerkulexErrors(byte statusError, byte detailError) {
   Serial.println("========================");
 }
 
-void herkulex_moveTo(byte id, uint16_t position, byte playtime) {
-  byte data[5];
+// Calcula playtime basado en distancia y velocidad objetivo
+uint8_t herkulex_computePlaytime(uint16_t current, uint16_t goal, float v_counts_per_s) {
+  int32_t diff = (int32_t)goal - (int32_t)current;
+  uint32_t dist = (diff >= 0) ? diff : -diff;
 
+  float t = dist / v_counts_per_s;
+
+  const float T_MIN = HERKULEX_MIN_PLAYTIME_MS / 1000.0f;
+  const float T_MAX = HERKULEX_MAX_PLAYTIME_MS / 1000.0f;
+
+  if (t < T_MIN) t = T_MIN;
+  if (t > T_MAX) t = T_MAX;
+
+  float pt = t / (HERKULEX_PLAYTIME_UNIT_MS / 1000.0f);
+
+  if (pt < 1.0f)   pt = 1.0f;
+  if (pt > 254.0f) pt = 254.0f;
+
+  return (uint8_t)(pt + 0.5f);
+}
+
+// Movimiento a posición usando S_JOG (sincronizado)
+// playtime: tiempo en unidades de 11.2ms (0 = calcular automáticamente)
+// ledFlags: flags de LED (LED_OFF, LED_GREEN, etc.) o 0 para sin LED
+void herkulex_moveTo(byte id, uint16_t position, byte playtime, byte ledFlags) {
+  byte data[5];
+  byte setByte = 0x00;  // Modo posición por defecto
+
+  // Configurar flags de LED si se especifican
+  if (ledFlags & LED_GREEN) setByte |= SET_LED_GREEN;
+  if (ledFlags & LED_BLUE) setByte |= SET_LED_BLUE;
+  if (ledFlags & LED_RED) setByte |= SET_LED_RED;
+
+  // Formato S_JOG: [playtime][JOG_LSB][JOG_MSB][SET][ID]
   data[0] = playtime;                // Tiempo de movimiento (11.2 ms * N)
   data[1] = position & 0xFF;         // Posición LSB
   data[2] = (position >> 8) & 0xFF;  // Posición MSB
-  data[3] = 0x00;                    // Info: Modo posición, sin LED
+  data[3] = setByte;                 // SET: Modo posición, LED según flags
   data[4] = id;                      // ID del motor
 
   byte packet[12];
   buildPacket(packet, id, CMD_S_JOG, data, 5);
   sendPacket(packet);
+  delay(HERKULEX_MIN_CMD_GAP_MS);
+}
+
+// Movimiento a posición usando I_JOG (individual, tiempo por servo)
+// playtime: tiempo en unidades de 11.2ms
+// ledFlags: flags de LED o 0 para sin LED
+void herkulex_iJog(byte id, uint16_t position, byte playtime, byte ledFlags) {
+  byte data[5];
+  byte setByte = 0x00;  // Modo posición por defecto
+
+  // Configurar flags de LED si se especifican
+  if (ledFlags & LED_GREEN) setByte |= SET_LED_GREEN;
+  if (ledFlags & LED_BLUE) setByte |= SET_LED_BLUE;
+  if (ledFlags & LED_RED) setByte |= SET_LED_RED;
+
+  // Formato I_JOG: [JOG_LSB][JOG_MSB][SET][ID][playtime]
+  data[0] = position & 0xFF;         // Posición LSB
+  data[1] = (position >> 8) & 0xFF;  // Posición MSB
+  data[2] = setByte;                 // SET: Modo posición, LED según flags
+  data[3] = id;                      // ID del motor
+  data[4] = playtime;                // Tiempo de movimiento (11.2 ms * N)
+
+  byte packet[12];
+  buildPacket(packet, id, CMD_I_JOG, data, 5);
+  sendPacket(packet);
+  delay(HERKULEX_MIN_CMD_GAP_MS);
+}
+
+// Giro continuo (modo velocidad) usando S_JOG
+// speed: velocidad en cuentas (0-1023, dirección según signo)
+// playtime: tiempo en unidades de 11.2ms
+// ledFlags: flags de LED o 0 para sin LED
+void herkulex_continuousRotation(byte id, int16_t speed, byte playtime, byte ledFlags) {
+  byte data[5];
+  byte setByte = SET_MODE_VELOCITY;  // Modo velocidad
+
+  // Configurar flags de LED si se especifican
+  if (ledFlags & LED_GREEN) setByte |= SET_LED_GREEN;
+  if (ledFlags & LED_BLUE) setByte |= SET_LED_BLUE;
+  if (ledFlags & LED_RED) setByte |= SET_LED_RED;
+
+  // Formato S_JOG: [playtime][JOG_LSB][JOG_MSB][SET][ID]
+  data[0] = playtime;                // Tiempo de movimiento
+  data[1] = speed & 0xFF;            // Velocidad LSB
+  data[2] = (speed >> 8) & 0xFF;     // Velocidad MSB
+  data[3] = setByte;                 // SET: Modo velocidad, LED según flags
+  data[4] = id;                      // ID del motor
+
+  byte packet[12];
+  buildPacket(packet, id, CMD_S_JOG, data, 5);
+  sendPacket(packet);
+  delay(HERKULEX_MIN_CMD_GAP_MS);
 }
 
 void commandEnableTorque(byte id) {
@@ -299,34 +475,291 @@ void commandSetCalibrationDiff(byte id, int16_t offset) {
   Serial.println(offset);
 }
 
+// ============================================================================
+// ESTRUCTURA PARA CONTROL DE TORQUE ADAPTATIVO
+// ============================================================================
+
 struct HerkulexMotor {
   byte id;
   int16_t offset = 0;  // offset de calibración
 };
 
+struct TorqueMonitor {
+  uint16_t pwmCurrent;        // PWM actual leído
+  uint16_t pwmMax;            // PWM máximo configurado
+  uint16_t pwmThreshold;      // Umbral de sobrecarga
+  bool overloadDetected;      // Flag de sobrecarga detectada
+  unsigned long lastCheck;    // Última vez que se verificó
+  float currentVelocity;      // Velocidad actual ajustada
+};
+
+// Monitorea PWM y detecta sobrecarga
+bool herkulex_monitorOverload(byte id, TorqueMonitor& monitor) {
+  uint16_t pwm = 0;
+  if (!herkulex_readPWM(id, pwm)) {
+    return false;
+  }
+  
+  monitor.pwmCurrent = pwm;
+  monitor.lastCheck = millis();
+  
+  // Detectar sobrecarga si PWM está por encima del umbral
+  if (pwm > monitor.pwmThreshold) {
+    monitor.overloadDetected = true;
+    return true;
+  } else {
+    monitor.overloadDetected = false;
+    return false;
+  }
+}
+
+// Ajusta velocidad dinámicamente basado en PWM
+// Retorna la velocidad ajustada en cuentas por segundo
+float herkulex_adaptiveVelocityControl(byte id, TorqueMonitor& monitor, float baseVelocity) {
+  if (!herkulex_monitorOverload(id, monitor)) {
+    // Sin sobrecarga, usar velocidad base
+    monitor.currentVelocity = baseVelocity;
+    return baseVelocity;
+  }
+  
+  // Reducir velocidad si hay sobrecarga
+  float reductionFactor = 0.8f;  // Reducir 20%
+  monitor.currentVelocity = baseVelocity * reductionFactor;
+  
+  // Límite mínimo
+  if (monitor.currentVelocity < 50.0f) {
+    monitor.currentVelocity = 50.0f;
+  }
+  
+  return monitor.currentVelocity;
+}
+
+// ============================================================================
+// ESTIMACIÓN DE TORQUE Y CORRIENTE BASADA EN PWM
+// ============================================================================
+
+// Estima el torque actual en Nm basado en el PWM leído
+// pwm: valor de PWM (0-1023)
+// pwmMax: PWM máximo configurado (por defecto 1023)
+// Retorna: torque estimado en Nm
+float herkulex_estimateTorqueFromPWM(uint16_t pwm, uint16_t pwmMax) {
+  if (pwmMax == 0) pwmMax = HERKULEX_PWM_MAX_VALUE;
+  
+  // PWM es proporcional al torque
+  // Torque = (PWM / PWM_MAX) * TORQUE_MAX
+  float ratio = (float)pwm / (float)pwmMax;
+  if (ratio > 1.0f) ratio = 1.0f;  // Limitar a 100%
+  
+  return ratio * HERKULEX_TORQUE_MAX_NM;
+}
+
+// Estima la corriente actual en mA basada en el PWM leído
+// pwm: valor de PWM (0-1023)
+// pwmMax: PWM máximo configurado (por defecto 1023)
+// Retorna: corriente estimada en mA
+float herkulex_estimateCurrentFromPWM(uint16_t pwm, uint16_t pwmMax) {
+  if (pwmMax == 0) pwmMax = HERKULEX_PWM_MAX_VALUE;
+  
+  // PWM es proporcional a la corriente
+  // Corriente = (PWM / PWM_MAX) * CURRENT_MAX
+  float ratio = (float)pwm / (float)pwmMax;
+  if (ratio > 1.0f) ratio = 1.0f;  // Limitar a 100%
+  
+  return ratio * HERKULEX_CURRENT_MAX_MA;
+}
+
+// Obtiene el porcentaje de torque actual (0-100%)
+// pwm: valor de PWM (0-1023)
+// pwmMax: PWM máximo configurado (por defecto 1023)
+// Retorna: porcentaje de torque (0.0 - 100.0)
+float herkulex_getTorquePercentage(uint16_t pwm, uint16_t pwmMax) {
+  if (pwmMax == 0) pwmMax = HERKULEX_PWM_MAX_VALUE;
+  
+  float ratio = (float)pwm / (float)pwmMax;
+  if (ratio > 1.0f) ratio = 1.0f;
+  
+  return ratio * 100.0f;
+}
+
+// Lee PWM y calcula torque estimado
+// id: ID del servo
+// torque: variable donde se guardará el torque estimado en Nm
+// pwmMax: PWM máximo configurado (0 = usar valor por defecto)
+// Retorna: true si se pudo leer el PWM, false en caso de error
+bool herkulex_readTorque(byte id, float& torque, uint16_t pwmMax) {
+  uint16_t pwm = 0;
+  if (!herkulex_readPWM(id, pwm)) {
+    return false;
+  }
+  
+  torque = herkulex_estimateTorqueFromPWM(pwm, pwmMax);
+  return true;
+}
+
+// Lee PWM y calcula corriente estimada
+// id: ID del servo
+// current: variable donde se guardará la corriente estimada en mA
+// pwmMax: PWM máximo configurado (0 = usar valor por defecto)
+// Retorna: true si se pudo leer el PWM, false en caso de error
+bool herkulex_readCurrent(byte id, float& current, uint16_t pwmMax) {
+  uint16_t pwm = 0;
+  if (!herkulex_readPWM(id, pwm)) {
+    return false;
+  }
+  
+  current = herkulex_estimateCurrentFromPWM(pwm, pwmMax);
+  return true;
+}
+
+// Obtiene información completa de torque/corriente
+// id: ID del servo
+// pwm: valor de PWM leído
+// torque: torque estimado en Nm
+// current: corriente estimada en mA
+// percentage: porcentaje de torque (0-100%)
+// pwmMax: PWM máximo configurado (0 = usar valor por defecto)
+// Retorna: true si se pudo leer, false en caso de error
+bool herkulex_getTorqueInfo(byte id, uint16_t& pwm, float& torque, float& current, 
+                            float& percentage, uint16_t pwmMax) {
+  if (!herkulex_readPWM(id, pwm)) {
+    return false;
+  }
+  
+  if (pwmMax == 0) pwmMax = HERKULEX_PWM_MAX_VALUE;
+  
+  torque = herkulex_estimateTorqueFromPWM(pwm, pwmMax);
+  current = herkulex_estimateCurrentFromPWM(pwm, pwmMax);
+  percentage = herkulex_getTorquePercentage(pwm, pwmMax);
+  
+  return true;
+}
+
+// ============================================================================
+// FUNCIONES DE LECTURA
+// ============================================================================
+
+// Lee voltaje actual (en décimas de voltio, ej: 120 = 12.0V)
+bool herkulex_readVoltage(byte id, byte& voltage) {
+  return readRAMByte(id, ADDR_VOLTAGE_SENSOR, voltage);
+}
+
+// Lee temperatura actual (en grados Celsius)
+bool herkulex_readTemperature(byte id, byte& temperature) {
+  return readRAMByte(id, ADDR_TEMPERATURE_SENSOR, temperature);
+}
+
+// Lee PWM actual (0-1023)
+bool herkulex_readPWM(byte id, uint16_t& pwm) {
+  return readRAMWord(id, ADDR_PWM_OUT_L, pwm);
+}
+
+// Lee modo de control actual (0=Posición, 1=Velocidad)
+bool herkulex_readCurrentMode(byte id, byte& mode) {
+  return readRAMByte(id, ADDR_CURRENT_MODE, mode);
+}
+
+// Lee posición absoluta (sin calibrar)
+bool herkulex_readAbsolutePosition(byte id, uint16_t& position) {
+  return readRAMWord(id, ADDR_POS_ABS_L, position);
+}
+
+// Lee posición objetivo
+bool herkulex_readTargetPosition(byte id, uint16_t& position) {
+  return readRAMWord(id, ADDR_POS_ABS_OBJ_L, position);
+}
+
+// Lee velocidad deseada actual
+bool herkulex_readSpeed(byte id, uint16_t& speed) {
+  return readRAMWord(id, ADDR_SPEED_GOAL_L, speed);
+}
+
+// ============================================================================
+// FUNCIONES DE ESCRITURA
+// ============================================================================
+
 void commandSetAcceleration(byte id, byte accelRatio, byte accelTime) {
-  byte packet[13];
   byte data[4];
 
-  data[0] = ADDR_ACCEL_RATIO; // 0x0E
+  data[0] = ADDR_RAM_ACCEL_RATIO;
   data[1] = 2;
-  data[2] = accelRatio;      // 0–100 %
+  data[2] = accelRatio;      // 0–50 %
   data[3] = accelTime;       // ×11.2 ms
 
+  byte packet[11];
   buildPacket(packet, id, CMD_RAM_WRITE, data, 4);
   sendPacket(packet);
+  delay(HERKULEX_MIN_CMD_GAP_MS);
 
   Serial.print(F("Aceleración: ratio="));
   Serial.print(accelRatio);
   Serial.print(F("%, time="));
-  Serial.print(accelTime * 11.2);
+  Serial.print(accelTime * HERKULEX_PLAYTIME_UNIT_MS);
   Serial.println(F(" ms"));
 }
 
-void herkulex_safeMoveTo(byte id, uint16_t targetPosition) {
+// Configura PWM máximo (0-1023)
+void herkulex_setMaxPWM(byte id, uint16_t maxPWM, bool writeToEEP) {
+  if (maxPWM > HERKULEX_PWM_MAX_VALUE) maxPWM = HERKULEX_PWM_MAX_VALUE;
+  
+  byte data[4];
+  data[0] = writeToEEP ? ADDR_ROM_PWM_MAX_L : ADDR_RAM_PWM_MAX_L;
+  data[1] = 0x02;
+  data[2] = maxPWM & 0xFF;         // LSB
+  data[3] = (maxPWM >> 8) & 0xFF;  // MSB
+
+  byte packet[11];
+  buildPacket(packet, id, writeToEEP ? CMD_EEP_WRITE : CMD_RAM_WRITE, data, 4);
+  sendPacket(packet);
+  delay(HERKULEX_MIN_CMD_GAP_MS);
+  
+  if (writeToEEP) {
+    Serial.println(F("⚠️ Cambios en EEP requieren REBOOT para aplicar"));
+  }
+}
+
+// Configura PWM mínimo (0-254)
+void herkulex_setMinPWM(byte id, byte minPWM, bool writeToEEP) {
+  byte data[3];
+  data[0] = writeToEEP ? ADDR_ROM_PWM_MIN : ADDR_RAM_PWM_MIN;
+  data[1] = 0x01;
+  data[2] = minPWM;
+
+  byte packet[10];
+  buildPacket(packet, id, writeToEEP ? CMD_EEP_WRITE : CMD_RAM_WRITE, data, 3);
+  sendPacket(packet);
+  delay(HERKULEX_MIN_CMD_GAP_MS);
+  
+  if (writeToEEP) {
+    Serial.println(F("⚠️ Cambios en EEP requieren REBOOT para aplicar"));
+  }
+}
+
+// Configura umbral de sobrecarga PWM (0-1023)
+void herkulex_setOverloadThreshold(byte id, uint16_t threshold, bool writeToEEP) {
+  if (threshold > HERKULEX_PWM_MAX_VALUE) threshold = HERKULEX_PWM_MAX_VALUE;
+  
+  byte data[4];
+  data[0] = writeToEEP ? ADDR_ROM_PWM_OVERLOAD_L : ADDR_RAM_PWM_OVERLOAD_L;
+  data[1] = 0x02;
+  data[2] = threshold & 0xFF;         // LSB
+  data[3] = (threshold >> 8) & 0xFF;  // MSB
+
+  byte packet[11];
+  buildPacket(packet, id, writeToEEP ? CMD_EEP_WRITE : CMD_RAM_WRITE, data, 4);
+  sendPacket(packet);
+  delay(HERKULEX_MIN_CMD_GAP_MS);
+  
+  if (writeToEEP) {
+    Serial.println(F("⚠️ Cambios en EEP requieren REBOOT para aplicar"));
+  }
+}
+
+// Movimiento seguro con cálculo automático de playtime
+// velocity: velocidad objetivo en cuentas por segundo (0 = usar valor por defecto)
+void herkulex_safeMoveTo(byte id, uint16_t targetPosition, float velocity) {
   // Verificar si la posición objetivo está dentro del rango permitido
   if (targetPosition < POS_MIN_DEF || targetPosition > POS_MAX_DEF) {
-    Serial.print(F(" Posición "));
+    Serial.print(F("⚠️ Posición "));
     Serial.print(targetPosition);
     Serial.print(F(" fuera de rango permitido ("));
     Serial.print(POS_MIN_DEF);
@@ -338,38 +771,21 @@ void herkulex_safeMoveTo(byte id, uint16_t targetPosition) {
 
   // Leer posición actual
   uint16_t currentPosition = readPosition(id);
+  if (currentPosition == 0xFFFF) {
+    Serial.println(F("⚠️ Error al leer posición actual. Movimiento cancelado."));
+    return;
+  }
 
-  
-  /*
-  // Calcular diferencia
-  uint16_t diff = abs((int32_t)targetPosition - (int32_t)currentPosition);
+  // Usar velocidad por defecto si no se especifica
+  if (velocity <= 0) {
+    velocity = HERKULEX_DEFAULT_VELOCITY_COUNTS_PER_S;
+  }
 
-  // Calcular playtime según distancia
-  uint16_t playtime = map(diff, 0, 10000, PLAYTIME_MIN, PLAYTIME_MAX);
-  playtime = constrain(playtime, PLAYTIME_MIN, PLAYTIME_MAX);
+  // Calcular playtime basado en distancia y velocidad
+  uint8_t playtime = herkulex_computePlaytime(currentPosition, targetPosition, velocity);
 
   // Ejecutar movimiento
-  herkulex_moveTo(id, targetPosition, playtime);
-
-  // Debug
-  Serial.print(F("✅ Moviendo de "));
-  Serial.print(currentPosition);
-  Serial.print(F(" a "));
-  Serial.print(targetPosition);
-  Serial.print(F(" con playtime: "));
-  Serial.print(playtime);
-  Serial.println(F(" (x11.2ms)"));
-  */
-  //
-  // Calcular playtime según distancia
-  uint16_t diff = abs((int32_t)targetPosition - (int32_t)currentPosition);
-
-  // Mapeás a un rango útil, por ejemplo de 10 a 255 (en ticks de 11.2 ms)
-  uint8_t playtime = map(diff, 0, 10000, 10, 255); 
-  playtime = constrain(playtime, 10, 255);
-
-  // Ejecutar
-  herkulex_moveTo(id, targetPosition, playtime);
+  herkulex_moveTo(id, targetPosition, playtime, LED_OFF);
 
   // Log
   Serial.print(F("✅ Moviendo de "));
@@ -378,30 +794,44 @@ void herkulex_safeMoveTo(byte id, uint16_t targetPosition) {
   Serial.print(targetPosition);
   Serial.print(F(" con playtime: "));
   Serial.print(playtime);
-  Serial.println(F(" (x11.2ms)"));
-
+  Serial.print(F(" ("));
+  Serial.print(playtime * HERKULEX_PLAYTIME_UNIT_MS);
+  Serial.print(F(" ms, velocidad: "));
+  Serial.print(velocity);
+  Serial.println(F(" cuentas/s)"));
 }
 
-void herkulex_sJogMultiMove(byte ids[], uint16_t posiciones[], byte cantidad, byte playtime) {
+// Movimiento sincronizado múltiple usando S_JOG
+// ids: array de IDs de servos
+// posiciones: array de posiciones objetivo
+// cantidad: número de servos
+// playtime: tiempo compartido en unidades de 11.2ms
+// ledFlags: flags de LED para todos los servos (0 = sin LED)
+void herkulex_sJogMultiMove(byte ids[], uint16_t posiciones[], byte cantidad, byte playtime, byte ledFlags) {
   const byte CMD = CMD_S_JOG;       // Comando de movimiento múltiple
   const byte ID_BROADCAST = 0xFE;   // ID de broadcast para todos los motores
 
   byte data[1 + 4 * cantidad];      // 1 byte playtime + 4 por motor
   data[0] = playtime;               // Playtime compartido
 
+  byte setByte = 0x00;  // Modo posición por defecto
+  // Configurar flags de LED si se especifican
+  if (ledFlags & LED_GREEN) setByte |= SET_LED_GREEN;
+  if (ledFlags & LED_BLUE) setByte |= SET_LED_BLUE;
+  if (ledFlags & LED_RED) setByte |= SET_LED_RED;
+
   byte idx = 1;
   for (byte i = 0; i < cantidad; i++) {
     data[idx++] = posiciones[i] & 0xFF;         // Pos_L
     data[idx++] = (posiciones[i] >> 8) & 0xFF;  // Pos_H
-    data[idx++] = 0x00;                         // Info: modo posición, sin LED ni STOP
+    data[idx++] = setByte;                      // SET: modo posición, LED según flags
     data[idx++] = ids[i];                       // ID del motor
   }
 
   byte packet[7 + sizeof(data)];  // Cabecera + payload
   buildPacket(packet, ID_BROADCAST, CMD, data, idx);
   sendPacket(packet);
-  delay(4000);  // Esperar que terminen de moverse
-  revisarErroresMotores(ids, cantidad);
+  delay(HERKULEX_MIN_CMD_GAP_MS);
 }
 
 
