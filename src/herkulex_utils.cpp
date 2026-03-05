@@ -32,15 +32,17 @@ void sendPacket(const byte* packet) {
     Serial1.write(packet[i]);
   }
 
-  // También mostrar por consola para debug
-  Serial.print("Paquete enviado: ");
-  for (int i = 0; i < len; i++) {
-    Serial.print("0x");
-    if (packet[i] < 0x10) Serial.print("0");
-    Serial.print(packet[i], HEX);
-    Serial.print(" ");
+  // También mostrar por consola para debug (solo si está habilitado)
+  if (HERKULEX_DEBUG_PACKETS) {
+    Serial.print("Paquete enviado: ");
+    for (int i = 0; i < len; i++) {
+      Serial.print("0x");
+      if (packet[i] < 0x10) Serial.print("0");
+      Serial.print(packet[i], HEX);
+      Serial.print(" ");
+    }
+    Serial.println();
   }
-  Serial.println();
 }
 
 void herkulex_ledSet(byte id, byte color) {
@@ -484,15 +486,6 @@ struct HerkulexMotor {
   int16_t offset = 0;  // offset de calibración
 };
 
-struct TorqueMonitor {
-  uint16_t pwmCurrent;        // PWM actual leído
-  uint16_t pwmMax;            // PWM máximo configurado
-  uint16_t pwmThreshold;      // Umbral de sobrecarga
-  bool overloadDetected;      // Flag de sobrecarga detectada
-  unsigned long lastCheck;    // Última vez que se verificó
-  float currentVelocity;      // Velocidad actual ajustada
-};
-
 // Monitorea PWM y detecta sobrecarga
 bool herkulex_monitorOverload(byte id, TorqueMonitor& monitor) {
   uint16_t pwm = 0;
@@ -863,6 +856,8 @@ void commandSetServoPolicy(byte id, byte policy) {
 }
 // --- helpers de debug ---
 void dumpBytes(const uint8_t* buf, int n, const __FlashStringHelper* tag) {
+  if (!HERKULEX_DEBUG_PACKETS) return;  // Salir si debug está desactivado
+  
   Serial.print(tag);
   Serial.print(F(" ("));
   Serial.print(n);

@@ -287,6 +287,11 @@
 #define HERKULEX_PWM_CRITICAL_LIMIT 950   // PWM crítico
 #define HERKULEX_PWM_MAX_VALUE      1023  // Valor máximo de PWM
 
+// Debug de paquetes (puede ser sobrescrito desde el sketch)
+#ifndef HERKULEX_DEBUG_PACKETS
+#define HERKULEX_DEBUG_PACKETS 0  // 0 = desactivado, 1 = activado
+#endif
+
 // Estimación de torque basada en PWM
 // Nota: El manual no proporciona valores exactos, estas son estimaciones basadas en
 // que PWM es proporcional a la corriente, y la corriente es proporcional al torque
@@ -295,13 +300,13 @@
 #define HERKULEX_CURRENT_MAX_MA     2000.0f  // Corriente máxima estimada en mA (ajustable)
 
 // Poses predefinidas
-#define POSE_INICIAL   {16507, 18800, 16000, 18000, 16411}
-#define POSE_TRABAJO   {16001, 15093, 12381, 18000, 16411}
-#define POSE_TRABAJO_2  {16001, 16655, 16302, 18000, 14878}
-#define POSE_MATE      {16931, 15576, 14394, 16532, 15938}
-#define POSE_MATE_2    {16282, 17427, 16549, 17843, 13832}
-#define POSE_SUP       {13365, 16436, 11700, 19535, 14400}
-#define POSE_END       {16282, 17387, 16243, 17843, 13832}
+//#define POSE_INICIAL   {16507, 18800, 16000, 18000, 16411}
+//#define POSE_TRABAJO   {16001, 15093, 12381, 18000, 16411}
+//#define POSE_TRABAJO_2  {16001, 16655, 16302, 18000, 14878}
+//#define POSE_MATE      {16931, 15576, 14394, 16532, 15938}
+//#define POSE_MATE_2    {16282, 17427, 16549, 17843, 13832}
+//#define POSE_SUP       {13365, 16436, 11700, 19535, 14400}
+//#define POSE_END       {16282, 17387, 16243, 17843, 13832}
 
 /*
 motor - posicion cero sleep segun Valentín 

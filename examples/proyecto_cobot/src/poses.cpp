@@ -1,0 +1,22 @@
+#include "poses.h"
+
+
+const Pose POSE_INICIAL = {
+  "INICIAL",
+  {16211, 16979, 16200, 17897, 14684}
+};
+
+const Pose POSE_STANDBY = {
+  "STANDBY",
+  {16202, 17334, 16589, 17897, 14648}
+};
+
+const Pose POSE_TRABAJO = {
+  "TRABAJO1",
+  {16266, 15717, 14580, 17899, 13624}
+};
+
+const Pose POSE_TRABAJO_2 = {
+  "TRABAJO2",
+  {17129, 14111, 15623, 18061, 13965}
+};

@@ -1,3 +1,18 @@
+
+#include <Arduino.h>
+#include "herkulex_defs.h"
+#include "herkulex_utils.h"
+void setup() {
+  Serial.begin(115200);
+  Serial1.begin(115200);  // Comunicación con motores
+  delay(500);
+  
+
+  // Pines desde la ESP (sin pull-up, la ESP entrega HIGH/L
+};
+void loop() {};
+
+/*
 #include <Arduino.h>
 #include "herkulex_defs.h"
 #include "herkulex_utils.h"
@@ -316,3 +331,4 @@ void serialEvent() {
     }
   }
 }
+*/
