@@ -1,0 +1,5 @@
+config/wifi_config.h
+arduino/esp32_bridge/wifi_config.h
+__pycache__/
+*.pyc
+.pio/
