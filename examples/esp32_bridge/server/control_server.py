@@ -17,11 +17,13 @@ last_mega_report: dict | None = None
 lock = threading.Lock()
 
 MEGA_CMD_MAP = {
-    0: "POSE_INICIAL",
-    1: "POSE_TRABAJO",
-    2: "POSE_TRABAJO_2",
-    3: "POSE_STANDBY",
+    0: "Inicial",
+    1: "Trabajo",
+    2: "Trabajo 2",
+    3: "Standby",
 }
+
+CMD_LABELS = {i: (MEGA_CMD_MAP[i] if i in MEGA_CMD_MAP else f"Cmd {i}") for i in range(16)}
 
 HTML = """<!DOCTYPE html>
 <html lang="es">
@@ -30,82 +32,286 @@ HTML = """<!DOCTYPE html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Control Brazo Cobot</title>
   <style>
+    :root {
+      --bg: #0b0f14;
+      --panel: #141c27;
+      --panel2: #1a2433;
+      --line: #2a3544;
+      --text: #e8eef7;
+      --muted: #8b98a5;
+      --accent: #1d9bf0;
+      --accent2: #0ea5e9;
+      --ok: #34d399;
+      --warn: #fbbf24;
+      --err: #f87171;
+      --slot: #182230;
+    }
     * { box-sizing: border-box; }
     body {
-      font-family: system-ui, sans-serif;
-      max-width: 520px;
-      margin: 2rem auto;
-      padding: 0 1rem;
-      background: #0f1419;
-      color: #e7ecf3;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      margin: 0;
+      background: radial-gradient(circle at top, #152033 0%, var(--bg) 55%);
+      color: var(--text);
+      min-height: 100vh;
     }
-    h1 { font-size: 1.25rem; margin-bottom: 0.25rem; }
-    h2 { font-size: 1rem; margin: 1.5rem 0 0.5rem; color: #8b98a5; }
-    p.sub { color: #8b98a5; font-size: 0.9rem; margin-top: 0; }
-    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-top: 1rem; }
-    button {
-      padding: 1rem; font-size: 1rem; border: none; border-radius: 10px;
-      cursor: pointer; background: #1d9bf0; color: white; font-weight: 600;
+    .wrap {
+      max-width: 920px;
+      margin: 0 auto;
+      padding: 1.25rem 1rem 2rem;
     }
-    button:hover { background: #1a8cd8; }
+    header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 1rem;
+      margin-bottom: 1rem;
+    }
+    h1 { font-size: 1.35rem; margin: 0; }
+    .sub { color: var(--muted); font-size: 0.92rem; margin: 0.25rem 0 0; }
+    .badges { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+    .badge {
+      font-size: 0.78rem;
+      padding: 0.35rem 0.65rem;
+      border-radius: 999px;
+      background: var(--panel2);
+      border: 1px solid var(--line);
+      color: var(--muted);
+    }
+    .badge.live { color: var(--ok); border-color: #1f6f52; background: #10241c; }
+    .badge.idle { color: var(--muted); }
+    .badge.alert { color: var(--err); border-color: #7f1d1d; background: #2a1212; }
+
+    .grid-15 {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 0.65rem;
+      margin: 1rem 0;
+    }
+    @media (max-width: 720px) {
+      .grid-15 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    }
+    .cmd-btn {
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      min-height: 74px;
+      padding: 0.55rem 0.5rem 0.45rem;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: linear-gradient(180deg, var(--slot) 0%, #121820 100%);
+      color: var(--text);
+      cursor: pointer;
+      transition: transform 0.08s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+      text-align: left;
+    }
+    .cmd-btn:hover {
+      transform: translateY(-1px);
+      border-color: #3d5168;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.25);
+    }
+    .cmd-btn:active { transform: translateY(0); }
+    .cmd-btn.active {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px rgba(29,155,240,0.35);
+    }
+    .cmd-btn.named {
+      background: linear-gradient(180deg, #15283a 0%, #101820 100%);
+    }
+    .cmd-num {
+      font-size: 0.72rem;
+      color: var(--muted);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .cmd-label {
+      font-size: 0.92rem;
+      font-weight: 700;
+      margin-top: 0.15rem;
+      line-height: 1.15;
+    }
+    .cmd-bits {
+      font-size: 0.72rem;
+      color: var(--accent2);
+      margin-top: 0.25rem;
+      font-family: ui-monospace, monospace;
+    }
+
     .panel {
-      margin-top: 1rem; padding: 0.85rem 1rem; border-radius: 8px;
-      background: #1a2332; font-size: 0.88rem; line-height: 1.5;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 0.9rem 1rem;
+      margin-top: 0.85rem;
     }
-    table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; font-size: 0.85rem; }
-    th, td { text-align: left; padding: 0.35rem 0.5rem; border-bottom: 1px solid #2a3544; }
-    .hi { color: #6ee7a0; font-weight: 700; }
-    .lo { color: #8b98a5; }
-    .ok { color: #6ee7a0; }
-    .err { color: #f87171; }
-    .muted { color: #8b98a5; }
-    code { background: #0f1419; padding: 0.1rem 0.35rem; border-radius: 4px; }
+    .panel h2 {
+      font-size: 0.82rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      margin: 0 0 0.55rem;
+    }
+    .status-line { font-size: 0.95rem; line-height: 1.45; }
+    .ok { color: var(--ok); }
+    .err { color: var(--err); }
+    .warn { color: var(--warn); }
+    .muted { color: var(--muted); }
+
+    table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+    th, td {
+      text-align: left;
+      padding: 0.38rem 0.45rem;
+      border-bottom: 1px solid var(--line);
+    }
+    .hi { color: var(--ok); font-weight: 700; }
+    .lo { color: var(--muted); }
+    code {
+      background: #0a1018;
+      padding: 0.12rem 0.35rem;
+      border-radius: 4px;
+      font-size: 0.85em;
+    }
+    .bits-row {
+      display: flex;
+      gap: 0.35rem;
+      flex-wrap: wrap;
+      margin-top: 0.5rem;
+    }
+    .bit {
+      width: 2rem;
+      text-align: center;
+      padding: 0.35rem 0;
+      border-radius: 8px;
+      font-size: 0.75rem;
+      border: 1px solid var(--line);
+      background: #0f141c;
+      color: var(--muted);
+    }
+    .bit.on {
+      background: #123047;
+      border-color: #2563eb;
+      color: #bfdbfe;
+      font-weight: 700;
+    }
   </style>
 </head>
 <body>
-  <h1>Brazo HerkuleX</h1>
-  <p class="sub">Comandos vía servidor → ESP → Mega (bus paralelo)</p>
-  <div class="grid">
-    <button onclick="send(0)">0 · Inicial</button>
-    <button onclick="send(1)">1 · Trabajo</button>
-    <button onclick="send(2)">2 · Trabajo 2</button>
-    <button onclick="send(3)">3 · Standby</button>
+  <div class="wrap">
+    <header>
+      <div>
+        <h1>Brazo HerkuleX · Panel de control</h1>
+        <p class="sub">Servidor → ESP8266 → Mega · 4 bits (D5–D8) + latch D3→44</p>
+      </div>
+      <div class="badges">
+        <span id="espBadge" class="badge idle">ESP sin datos</span>
+        <span id="megaBadge" class="badge idle">Mega sin respuesta</span>
+      </div>
+    </header>
+
+    <div class="grid-15" id="cmdGrid"></div>
+
+    <div id="status" class="panel">
+      <h2>Estado</h2>
+      <div class="status-line muted">Seleccioná un comando (0–15).</div>
+    </div>
+
+    <div class="panel">
+      <h2>Mapa de bits → Mega</h2>
+      <div class="muted" style="font-size:0.88rem;margin-bottom:0.35rem;">
+        Comando N se envía como valor binario en D5 (bit0) … D8 (bit3).
+      </div>
+      <div id="bitPreview" class="bits-row"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Último reporte ESP</h2>
+      <div id="espReport" class="muted">Esperando reporte...</div>
+    </div>
+
+    <div class="panel">
+      <h2>Respuesta Mega (Serial2 → ESP)</h2>
+      <div id="megaReport" class="muted">Esperando OK/ERR del Mega...</div>
+    </div>
   </div>
-  <div id="status" class="panel">Listo.</div>
-
-  <h2>Mapa comando → pines ESP → Mega</h2>
-  <div class="panel muted">
-    Bit 0 (LSB) = D5, bit 1 = D6, bit 2 = D7, bit 3 = D8. Latch = D3 → Mega 44.
-  </div>
-
-  <h2>Último reporte de la ESP</h2>
-  <div id="espReport" class="panel muted">Esperando reporte...</div>
-
-  <h2>Respuesta del Mega (serial)</h2>
-  <div id="megaReport" class="panel muted">Esperando OK del Mega...</div>
 
   <script>
-    async function send(cmd) {
-      const el = document.getElementById('status');
-      el.textContent = 'Enviando comando ' + cmd + '...';
-      el.className = 'panel';
+    const CMD_LABELS = {
+      0: "Inicial", 1: "Trabajo", 2: "Trabajo 2", 3: "Standby"
+    };
+    let lastSent = null;
+
+    function labelFor(cmd) {
+      return CMD_LABELS[cmd] || ("Reservado " + cmd);
+    }
+
+    function bitsString(cmd) {
+      return cmd.toString(2).padStart(4, "0");
+    }
+
+    function buildGrid() {
+      const grid = document.getElementById("cmdGrid");
+      for (let cmd = 0; cmd <= 15; cmd++) {
+        const btn = document.createElement("button");
+        btn.className = "cmd-btn" + (cmd <= 3 ? " named" : "");
+        btn.dataset.cmd = cmd;
+        btn.innerHTML =
+          '<span class="cmd-num">CMD ' + cmd + '</span>' +
+          '<span class="cmd-label">' + labelFor(cmd) + '</span>' +
+          '<span class="cmd-bits">' + bitsString(cmd) + 'b</span>';
+        btn.onclick = () => send(cmd, btn);
+        grid.appendChild(btn);
+      }
+      renderBitPreview(null);
+    }
+
+    function renderBitPreview(cmd) {
+      const row = document.getElementById("bitPreview");
+      row.innerHTML = "";
+      if (cmd === null) {
+        row.innerHTML = '<span class="muted">Pulsá un botón para ver los bits.</span>';
+        return;
+      }
+      const bits = bitsString(cmd);
+      for (let i = 0; i < 4; i++) {
+        const el = document.createElement("div");
+        el.className = "bit" + (bits[3 - i] === "1" ? " on" : "");
+        el.textContent = "b" + i;
+        row.appendChild(el);
+      }
+      const info = document.createElement("div");
+      info.className = "muted";
+      info.style.width = "100%";
+      info.style.marginTop = "0.35rem";
+      info.textContent = "Valor " + cmd + " → bits " + bits;
+      row.appendChild(info);
+    }
+
+    async function send(cmd, btn) {
+      lastSent = cmd;
+      renderBitPreview(cmd);
+      document.querySelectorAll(".cmd-btn").forEach(b => b.classList.remove("active"));
+      if (btn) btn.classList.add("active");
+
+      const el = document.getElementById("status");
+      el.innerHTML = '<h2>Estado</h2><div class="status-line">Enviando CMD <strong>' + cmd + '</strong> · ' + labelFor(cmd) + '...</div>';
+
       try {
-        const r = await fetch('/api/command', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+        const r = await fetch("/api/command", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ cmd })
         });
         const j = await r.json();
         if (j.ok) {
-          el.textContent = 'Comando ' + cmd + ' en cola. La ESP lo tomará en el próximo poll.';
-          el.className = 'panel ok';
+          el.innerHTML =
+            '<h2>Estado</h2><div class="status-line ok">CMD <strong>' + cmd + '</strong> en cola. La ESP lo tomará en el próximo poll.</div>';
         } else {
-          el.textContent = 'Error: ' + (j.error || 'desconocido');
-          el.className = 'panel err';
+          el.innerHTML =
+            '<h2>Estado</h2><div class="status-line err">Error: ' + (j.error || "desconocido") + '</div>';
         }
       } catch (e) {
-        el.textContent = 'Error de red: ' + e.message;
-        el.className = 'panel err';
+        el.innerHTML =
+          '<h2>Estado</h2><div class="status-line err">Error de red: ' + e.message + '</div>';
       }
     }
 
@@ -115,44 +321,69 @@ HTML = """<!DOCTYPE html>
 
     async function refreshStatus() {
       try {
-        const r = await fetch('/api/status');
+        const r = await fetch("/api/status");
         const j = await r.json();
-        const box = document.getElementById('espReport');
+
+        const espBadge = document.getElementById("espBadge");
+        if (j.last_report && j.age_sec < 8) {
+          espBadge.className = "badge live";
+          espBadge.textContent = "ESP activa · hace " + Math.round(j.age_sec) + "s";
+        } else {
+          espBadge.className = "badge idle";
+          espBadge.textContent = "ESP sin datos recientes";
+        }
+
+        const megaBadge = document.getElementById("megaBadge");
+        if (j.last_mega_report) {
+          const ok = (j.last_mega_report.line || "").startsWith("OK:");
+          const overload = (j.last_mega_report.line || "").startsWith("ERR:");
+          megaBadge.className = "badge " + (overload ? "alert" : (ok ? "live" : "idle"));
+          megaBadge.textContent = ok ? "Mega OK" : (overload ? "Mega · sobrecarga/ERR" : "Mega respondió");
+        } else {
+          megaBadge.className = "badge idle";
+          megaBadge.textContent = "Mega sin respuesta";
+        }
+
+        const box = document.getElementById("espReport");
         if (!j.last_report) {
-          box.innerHTML = 'Aún no hay reporte. Pulsá un botón cuando la ESP esté conectada.';
+          box.innerHTML = "Aún no hay reporte. Enviá un comando cuando la ESP esté conectada.";
         } else {
           const rep = j.last_report;
-          let rows = '';
+          let rows = "";
           (rep.pins || []).forEach((p, i) => {
             rows += '<tr><td>bit ' + i + '</td><td>' + p.esp + ' (GPIO ' + p.gpio + ')</td>'
               + '<td>' + levelCell(p.level) + '</td><td>Mega ' + p.mega + '</td></tr>';
           });
           const latch = rep.latch || {};
-          rows += '<tr><td>latch</td><td>' + (latch.esp || '?') + ' (GPIO ' + (latch.gpio || '?') + ')</td>'
-            + '<td>pulso LOW</td><td>Mega ' + (latch.mega || '?') + '</td></tr>';
+          rows += '<tr><td>latch</td><td>' + (latch.esp || "?") + '</td>'
+            + '<td>pulso</td><td>Mega ' + (latch.mega || "?") + '</td></tr>';
           box.innerHTML =
-            '<div><strong>Comando:</strong> <code>' + rep.cmd + '</code> &nbsp; '
-            + '<strong>Bits:</strong> <code>' + rep.bits + '</code></div>'
-            + '<div><strong>Mega debería:</strong> ' + rep.mega_expected + '</div>'
-            + '<div class="muted">Hace ' + Math.round(j.age_sec) + ' s · IP ESP: ' + (rep.esp_ip || '?') + '</div>'
-            + '<table><tr><th>Bit</th><th>ESP</th><th>Nivel</th><th>Mega pin</th></tr>' + rows + '</table>';
+            '<div><strong>CMD:</strong> <code>' + rep.cmd + '</code> · '
+            + labelFor(Number(rep.cmd)) + ' · <strong>bits:</strong> <code>' + (rep.bits || "?") + '</code></div>'
+            + '<div class="muted" style="margin-top:0.35rem;">' + (rep.mega_expected || "") + '</div>'
+            + '<div class="muted">IP ESP: ' + (rep.esp_ip || "?") + '</div>'
+            + '<table style="margin-top:0.5rem;"><tr><th>Bit</th><th>ESP</th><th>Nivel</th><th>Mega</th></tr>' + rows + '</table>';
         }
 
-        const megaBox = document.getElementById('megaReport');
+        const megaBox = document.getElementById("megaReport");
         if (j.last_mega_report) {
           const m = j.last_mega_report;
-          const ok = (m.line || '').startsWith('OK:');
+          const line = m.line || "";
+          const ok = line.startsWith("OK:");
+          const cls = ok ? "ok" : "err";
+          let hint = ok ? "Movimiento completado." : "Posible aborto por sobrecarga o error.";
           megaBox.innerHTML =
-            '<div class="' + (ok ? 'ok' : 'err') + '"><strong>' + m.line + '</strong></div>'
-            + '<div class="muted">Hace ' + Math.round(j.mega_age_sec) + ' s</div>';
+            '<div class="' + cls + '"><strong>' + line + '</strong></div>'
+            + '<div class="muted" style="margin-top:0.35rem;">' + hint + ' · hace ' + Math.round(j.mega_age_sec) + ' s</div>';
         } else {
-          megaBox.innerHTML = 'Sin respuesta del Mega aún (¿cable TX2→D1 con divisor?).';
+          megaBox.innerHTML = "Sin respuesta del Mega (¿TX2 pin16 → ESP D1 con divisor?).";
         }
       } catch (e) {
         console.error(e);
       }
     }
 
+    buildGrid();
     setInterval(refreshStatus, 1000);
     refreshStatus();
   </script>

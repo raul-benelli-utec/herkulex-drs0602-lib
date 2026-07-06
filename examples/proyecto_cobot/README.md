@@ -59,9 +59,28 @@ pio run -t upload
 
 ### Con Arduino IDE
 
-1. Abrir `src/main.cpp` en Arduino IDE
-2. Configurar la placa: **Arduino Mega 2560**
-3. Compilar y subir
+**No abras `src/main.cpp` directamente** — Arduino IDE no compila subcarpetas `src/` ni enlaza la librería sola.
+
+1. Ejecutá el script de preparación (copia fuentes + instala la librería):
+   ```bash
+   cd examples/proyecto_cobot
+   ./prepare_arduino_ide.sh
+   ```
+2. En Arduino IDE: **Archivo → Abrir** → `arduino_ide/sketch/proyecto_cobot.ino`
+3. **Herramientas → Placa → Arduino Mega or Mega 2560**
+4. **Herramientas → Puerto** → tu Mega por USB
+5. **Subir** y abrir **Monitor Serie** a **115200** baud
+
+La librería HerkuleX queda en `~/Arduino/libraries/HerkulexDRS0602/`. Si editás archivos en `src/` o `config/`, volvé a correr `./prepare_arduino_ide.sh` antes de subir.
+
+### Calibración de seguridad (sobrecarga)
+
+- Comando **`t`** en el monitor: muestra PWM actual de cada motor.
+- Motor **base (ID 1)**: en demo, dispara si el PWM sube **`SAFETY_PWM_DELTA_BASE`** (+55) sobre el valor al inicio del movimiento.
+- Ajustá en `config/brazo_config.h`: `SAFETY_PWM_MONITOR`, `SAFETY_PWM_DELTA_BASE`, `SAFETY_PWM_MAX`.
+- Para la demo: bloqueá el giro lateral **durante** el movimiento (comando `2` o `3` desde web o serial).
+- Si no dispara: bajá `SAFETY_PWM_DELTA_BASE` (ej. 40) o `SAFETY_PWM_MONITOR[0]` (ej. 120).
+- Si dispara sin carga: subí esos valores.
 
 ## Advertencias Importantes
 

@@ -51,6 +51,22 @@ bool Brazo::checkMotorPwmHigh(uint8_t motorIndex, uint16_t& pwmOut, bool& readOk
   return motors[motorIndex].pwmThreshold > 0 && pwm > motors[motorIndex].pwmThreshold;
 }
 
+bool Brazo::checkMotorOverload(uint8_t motorIndex, uint16_t pwm, bool readOk,
+                               const uint16_t* baseline, bool baselineReady) {
+  if (!readOk) {
+    return false;
+  }
+
+  if (motorIndex == MOTOR_INDEX_BASE && baselineReady && SAFETY_DEMO_MODE) {
+    const uint16_t deltaLimit = baseline[motorIndex] + SAFETY_PWM_DELTA_BASE;
+    if (pwm >= deltaLimit && pwm > motors[motorIndex].pwmThreshold) {
+      return true;
+    }
+  }
+
+  return motors[motorIndex].pwmThreshold > 0 && pwm > motors[motorIndex].pwmThreshold;
+}
+
 bool Brazo::checkMotorStatusError(uint8_t motorIndex) {
   byte statusError = 0;
   byte detailError = 0;
@@ -66,13 +82,33 @@ bool Brazo::checkMotorStatusError(uint8_t motorIndex) {
 }
 
 bool Brazo::waitAndMonitorMove(uint16_t playtimeMs) {
-  const unsigned long deadline = millis() + playtimeMs + 400;
+  const unsigned long moveStart = millis();
+  const unsigned long deadline = moveStart + playtimeMs + SAFETY_MONITOR_TAIL_MS;
   unsigned long lastCheck = 0;
   uint16_t peakPwm[NUM_MOTORES] = {};
+  uint16_t pwmBaseline[NUM_MOTORES] = {};
   uint8_t pwmHits[NUM_MOTORES] = {};
   uint8_t statusHits[NUM_MOTORES] = {};
+  bool baselineReady = false;
 
   while (millis() < deadline) {
+    if (!baselineReady && millis() - moveStart >= SAFETY_BASELINE_DELAY_MS) {
+      for (uint8_t i = 0; i < NUM_MOTORES; i++) {
+        uint16_t pwm = 0;
+        if (herkulex_readPWM(motors[i].id, pwm)) {
+          pwmBaseline[i] = pwm;
+        }
+        delay(3);
+      }
+      baselineReady = true;
+#if SAFETY_DEBUG_PWM
+      Serial.print(F("[MON] baseline base="));
+      Serial.print(pwmBaseline[MOTOR_INDEX_BASE]);
+      Serial.print(F(" delta>="));
+      Serial.println(pwmBaseline[MOTOR_INDEX_BASE] + SAFETY_PWM_DELTA_BASE);
+#endif
+    }
+
     if (millis() - lastCheck >= SAFETY_MONITOR_INTERVAL_MS) {
       lastCheck = millis();
 
@@ -87,12 +123,17 @@ bool Brazo::waitAndMonitorMove(uint16_t playtimeMs) {
       for (uint8_t i = 0; i < NUM_MOTORES; i++) {
         uint16_t pwm = 0;
         bool readOk = false;
-        const bool pwmHigh = checkMotorPwmHigh(i, pwm, readOk);
+        (void)checkMotorPwmHigh(i, pwm, readOk);
+        const bool pwmHigh = checkMotorOverload(i, pwm, readOk, pwmBaseline, baselineReady);
 #if SAFETY_USE_STATUS_CHECK
         const bool statusErr = checkMotorStatusError(i);
 #else
         const bool statusErr = false;
 #endif
+
+        const uint8_t hitsNeeded = (i == MOTOR_INDEX_BASE)
+          ? SAFETY_BASE_CONSECUTIVE_HITS
+          : SAFETY_PWM_CONSECUTIVE_HITS;
 
 #if SAFETY_DEBUG_PWM
         Serial.print(motors[i].id);
@@ -101,6 +142,9 @@ bool Brazo::waitAndMonitorMove(uint16_t playtimeMs) {
           Serial.print(F("ERR"));
         } else {
           Serial.print(pwm);
+        }
+        if (i == MOTOR_INDEX_BASE) {
+          Serial.print(F("*"));
         }
         if (i < NUM_MOTORES - 1) {
           Serial.print(F(" "));
@@ -113,7 +157,7 @@ bool Brazo::waitAndMonitorMove(uint16_t playtimeMs) {
 
         if (statusErr) {
           statusHits[i]++;
-          if (statusHits[i] >= SAFETY_PWM_CONSECUTIVE_HITS) {
+          if (statusHits[i] >= hitsNeeded) {
 #if SAFETY_DEBUG_PWM
             Serial.println();
 #endif
@@ -127,7 +171,7 @@ bool Brazo::waitAndMonitorMove(uint16_t playtimeMs) {
         if (readOk) {
           if (pwmHigh) {
             pwmHits[i]++;
-            if (pwmHits[i] >= SAFETY_PWM_CONSECUTIVE_HITS) {
+            if (pwmHits[i] >= hitsNeeded) {
 #if SAFETY_DEBUG_PWM
               Serial.println();
 #endif
@@ -175,6 +219,9 @@ void Brazo::retreatToStandbyOnOverload(uint8_t motorIndex, uint16_t pwm) {
   Serial.println(F("⚠️ SOBRECARGA detectada durante movimiento"));
   Serial.print(F("  Motor ID "));
   Serial.print(motors[motorIndex].id);
+  if (motorIndex == MOTOR_INDEX_BASE) {
+    Serial.print(F(" (BASE)"));
+  }
   Serial.print(F(" PWM="));
   Serial.print(pwm);
   Serial.print(F(" torque~"));
@@ -411,6 +458,13 @@ void Brazo::printTorqueSnapshot() {
   }
 
   Serial.println(F("Regla: MONITOR < OVERLOAD <= MAX (ver brazo_config.h)"));
+  if (SAFETY_DEMO_MODE) {
+    Serial.print(F("Demo: motor base ID "));
+    Serial.print(motors[MOTOR_INDEX_BASE].id);
+    Serial.print(F(" dispara si PWM sube +"));
+    Serial.print(SAFETY_PWM_DELTA_BASE);
+    Serial.println(F(" sobre baseline al inicio del movimiento"));
+  }
 }
 
 // Mover brazo a posiciones directamente (sin estructura Pose)

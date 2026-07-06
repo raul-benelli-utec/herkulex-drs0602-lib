@@ -51,6 +51,8 @@ struct Brazo {
 
 private:
   bool checkMotorPwmHigh(uint8_t motorIndex, uint16_t& pwmOut, bool& readOk);
+  bool checkMotorOverload(uint8_t motorIndex, uint16_t pwm, bool readOk,
+                          const uint16_t* baseline, bool baselineReady);
   bool checkMotorStatusError(uint8_t motorIndex);
   bool waitAndMonitorMove(uint16_t playtimeMs);
   void retreatToStandbyOnOverload(uint8_t motorIndex, uint16_t pwm);
