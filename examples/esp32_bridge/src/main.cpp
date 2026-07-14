@@ -4,9 +4,11 @@
   #include <ESP8266WiFi.h>
   #include <ESP8266HTTPClient.h>
   #include <WiFiClient.h>
+  #include <WiFiUdp.h>
 #elif defined(ESP32)
   #include <WiFi.h>
   #include <HTTPClient.h>
+  #include <WiFiUdp.h>
 #else
   #error "Placa no soportada"
 #endif
@@ -14,9 +16,19 @@
 #include "wifi_config.h"
 #include "parallel_bus.h"
 
+#ifndef DISCOVERY_PORT
+#define DISCOVERY_PORT 4210
+#endif
+
 #if defined(ESP8266)
 static WiFiClient wifiClient;
 #endif
+
+static WiFiUDP udp;
+static String g_host = SERVER_HOST;
+static uint16_t g_port = SERVER_PORT;
+static bool g_discovered = false;
+static unsigned long lastWhoMs = 0;
 
 static const char* megaPoseName(uint8_t cmd) {
   switch (cmd) {
@@ -26,6 +38,77 @@ static const char* megaPoseName(uint8_t cmd) {
     case 3: return "POSE_STANDBY";
     default: return "reservado";
   }
+}
+
+static String serverUrl(const char* path) {
+  String url = F("http://");
+  url += g_host;
+  url += ':';
+  url += g_port;
+  url += path;
+  return url;
+}
+
+static bool applyBeacon(const char* buf) {
+  if (strncmp(buf, "BRAZO_SRV ", 10) != 0) {
+    return false;
+  }
+  char host[48];
+  unsigned port = 0;
+  if (sscanf(buf + 10, "%47s %u", host, &port) != 2 || port == 0 || port > 65535) {
+    return false;
+  }
+  const bool changed = (!g_discovered || g_host != host || g_port != static_cast<uint16_t>(port));
+  g_host = host;
+  g_port = static_cast<uint16_t>(port);
+  g_discovered = true;
+  if (changed) {
+    Serial.print(F("Servidor encontrado: "));
+    Serial.print(g_host);
+    Serial.print(':');
+    Serial.println(g_port);
+  }
+  return true;
+}
+
+static void pollDiscovery() {
+  int n = udp.parsePacket();
+  while (n > 0) {
+    char buf[64];
+    const int len = udp.read(buf, sizeof(buf) - 1);
+    if (len > 0) {
+      buf[len] = '\0';
+      applyBeacon(buf);
+    }
+    n = udp.parsePacket();
+  }
+}
+
+static void askWho() {
+  udp.beginPacket(IPAddress(255, 255, 255, 255), DISCOVERY_PORT);
+  udp.write(reinterpret_cast<const uint8_t*>("BRAZO_WHO"), 9);
+  udp.endPacket();
+  lastWhoMs = millis();
+}
+
+static void discoverServer(unsigned long waitMs) {
+  Serial.println(F("Buscando servidor (UDP discovery)..."));
+  askWho();
+  const unsigned long t0 = millis();
+  while (millis() - t0 < waitMs) {
+    pollDiscovery();
+    if (g_discovered) {
+      return;
+    }
+    if (millis() - lastWhoMs > 800) {
+      askWho();
+    }
+    delay(20);
+  }
+  Serial.print(F("Sin beacon; fallback "));
+  Serial.print(g_host);
+  Serial.print(':');
+  Serial.println(g_port);
 }
 
 static void connectWiFi() {
@@ -43,6 +126,8 @@ static void connectWiFi() {
   if (WiFi.status() == WL_CONNECTED) {
     Serial.print(F("IP: "));
     Serial.println(WiFi.localIP());
+    udp.begin(DISCOVERY_PORT);
+    discoverServer(5000);
   }
 }
 
@@ -50,7 +135,7 @@ static void reportToServer(uint8_t cmd) {
   char bits[5];
   ParallelBus::formatBits(cmd, bits);
 
-  String url = String(F("http://")) + SERVER_HOST + ":" + SERVER_PORT + F("/api/esp/report");
+  String url = serverUrl("/api/esp/report");
   String body = F("{\"cmd\":");
   body += cmd;
   body += F(",\"bits\":\"");
@@ -91,7 +176,7 @@ static void reportToServer(uint8_t cmd) {
 
 static void pollServer() {
   HTTPClient http;
-  String url = String(F("http://")) + SERVER_HOST + ":" + SERVER_PORT + F("/api/poll");
+  String url = serverUrl("/api/poll");
 #if defined(ESP8266)
   http.begin(wifiClient, url);
 #else
@@ -101,6 +186,10 @@ static void pollServer() {
   const int code = http.GET();
   if (code != HTTP_CODE_OK) {
     http.end();
+    if (millis() - lastWhoMs > 2000) {
+      g_discovered = false;
+      askWho();
+    }
     return;
   }
   String body = http.getString();
@@ -127,9 +216,11 @@ void setup() {
 void loop() {
   if (WiFi.status() != WL_CONNECTED) {
     delay(1000);
+    g_discovered = false;
     connectWiFi();
     return;
   }
+  pollDiscovery();
   pollServer();
   delay(POLL_INTERVAL_MS);
 }

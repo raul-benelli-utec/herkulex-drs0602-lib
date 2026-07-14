@@ -16,6 +16,12 @@ last_esp_report: dict | None = None
 last_mega_report: dict | None = None
 lock = threading.Lock()
 
+# UDP discovery: la ESP encuentra la IP de la PC aunque cambie en el hotspot.
+DISCOVERY_PORT = 4210
+DISCOVERY_MAGIC = b"BRAZO_SRV"
+DISCOVERY_WHO = b"BRAZO_WHO"
+BEACON_INTERVAL_S = 2.0
+
 MEGA_CMD_MAP = {
     0: "Inicial",
     1: "Trabajo",
@@ -403,6 +409,48 @@ def local_ip() -> str:
         return "127.0.0.1"
 
 
+def discovery_beacon(http_ip: str, http_port: int, stop: threading.Event) -> None:
+    """Anuncia periodicamente la IP/puerto HTTP y responde a BRAZO_WHO."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    try:
+        sock.bind(("", DISCOVERY_PORT))
+    except OSError as exc:
+        print(f"  AVISO: no se pudo abrir discovery UDP :{DISCOVERY_PORT} ({exc})")
+        sock.close()
+        return
+    sock.settimeout(0.5)
+    print(f"  Discovery UDP: puerto {DISCOVERY_PORT} (beacon cada {BEACON_INTERVAL_S:.0f}s)")
+    next_beacon = 0.0
+    announced_ip = http_ip
+    while not stop.is_set():
+        now = time.time()
+        if now >= next_beacon:
+            # Releer IP por si el hotspot reasignó la de la PC.
+            announced_ip = local_ip()
+            msg = f"BRAZO_SRV {announced_ip} {http_port}".encode("ascii")
+            try:
+                sock.sendto(msg, ("255.255.255.255", DISCOVERY_PORT))
+            except OSError:
+                pass
+            next_beacon = now + BEACON_INTERVAL_S
+        try:
+            data, addr = sock.recvfrom(256)
+            if data.startswith(DISCOVERY_WHO):
+                msg = f"BRAZO_SRV {announced_ip} {http_port}".encode("ascii")
+                try:
+                    sock.sendto(msg, addr)
+                    print(f"  ↔ Discovery: respondí a {addr[0]}")
+                except OSError:
+                    pass
+        except socket.timeout:
+            pass
+        except OSError:
+            break
+    sock.close()
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args) -> None:
         print(f"[{self.address_string()}] {fmt % args}")
@@ -547,6 +595,14 @@ def main() -> None:
 
     ip = local_ip()
     server, port = bind_server(args.host, args.port)
+    stop = threading.Event()
+    beacon = threading.Thread(
+        target=discovery_beacon,
+        args=(ip, port, stop),
+        daemon=True,
+        name="discovery-beacon",
+    )
+    beacon.start()
 
     print("=" * 50)
     print("Servidor de control del brazo")
@@ -555,13 +611,15 @@ def main() -> None:
     print(f"  Interfaz web:  http://{ip}:{port}/")
     print(f"  Poll ESP:      GET  http://{ip}:{port}/api/poll")
     print(f"  Reporte ESP:   POST http://{ip}:{port}/api/esp/report")
-    print(f'  wifi_config.h: SERVER_HOST="{ip}"  SERVER_PORT={port}')
+    print(f"  Discovery UDP: BRAZO_SRV {ip} {port}  (puerto {DISCOVERY_PORT})")
+    print(f'  Fallback ESP:  SERVER_HOST="{ip}"  SERVER_PORT={port}')
     print("=" * 50)
 
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nCerrando servidor.")
+        stop.set()
         server.server_close()
 
 

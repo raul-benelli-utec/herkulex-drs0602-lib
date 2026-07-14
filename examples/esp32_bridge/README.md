@@ -65,11 +65,10 @@ cd examples/esp32_bridge/server
 python3 control_server.py
 ```
 
-Al arrancar imprime la **IP de tu PC**. Copiala en `wifi_config.h`:
+Al arrancar imprime la **IP de tu PC** y levanta un **beacon UDP** (puerto 4210).
+La ESP busca ese anuncio y aprende sola `IP:puerto` (útil en hotspot del celular, donde la IP puede cambiar).
 
-```c
-#define SERVER_HOST "192.168.x.x"   // la IP que muestra el servidor
-```
+`SERVER_HOST` / `SERVER_PORT` en `wifi_config.h` quedan como **fallback** si no hay beacon.
 
 Abrí en el navegador la URL que indica (ej. `http://192.168.1.50:8080/`).
 
@@ -120,5 +119,5 @@ Subir `examples/proyecto_cobot/` (incluye `esp_bridge` integrado).
 ## Solución de problemas
 
 - **`WiFi.h: No such file`**: no tenés el core ESP32 o la placa seleccionada no es ESP32.
-- **Poll HTTP error -1**: la PC no alcanzable; revisar `SERVER_HOST`, firewall, misma red WiFi.
+- **Poll HTTP error -1**: la PC no alcanzable; revisar misma red WiFi / hotspot, firewall, y que el servidor esté corriendo (beacon UDP en 4210).
 - **Comando en web pero el brazo no mueve**: revisar cableado GPIO y monitor serial del Mega.
