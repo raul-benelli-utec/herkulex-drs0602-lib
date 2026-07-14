@@ -8,14 +8,18 @@
 #include "poses.h"
 #include "brazo.h"
 #include "pose_manager.h"
+#include "esp_bridge.h"
+#include "mega_feedback.h"
 
 // Instancias globales
 Brazo brazo;
 PoseManager poseManager;
+EspBridge espBridge;
 
 // Forward declarations
 void processSingleCharCommand(char cmd);
 void printMenu();
+void handleEspCommand(uint8_t command);
 
 // Helper para leer una línea desde Serial. Solo retorna cuando el usuario
 // pulsa Enter (\r o \n). Si pasan 5 s sin Enter, retorna "" para no ejecutar
@@ -352,20 +356,29 @@ void processSingleCharCommand(char cmd) {
 
     case '1':
       Serial.println(F("-> Moviendo a POSE_INICIAL..."));
-      brazo.goPose(POSE_INICIAL, 1500);
-      Serial.println(F("✓ Completado"));
+      if (brazo.goPose(POSE_INICIAL, 1500)) {
+        Serial.println(F("✓ Completado"));
+      } else {
+        Serial.println(F("✗ Abortado por sobrecarga"));
+      }
       break;
 
     case '2':
       Serial.println(F("-> Moviendo a POSE_TRABAJO..."));
-      brazo.goPose(POSE_TRABAJO, 1500);
-      Serial.println(F("✓ Completado"));
+      if (brazo.goPose(POSE_TRABAJO, 1500)) {
+        Serial.println(F("✓ Completado"));
+      } else {
+        Serial.println(F("✗ Abortado por sobrecarga"));
+      }
       break;
 
     case '3':
       Serial.println(F("-> Moviendo a POSE_TRABAJO_2..."));
-      brazo.goPose(POSE_TRABAJO_2, 1500);
-      Serial.println(F("✓ Completado"));
+      if (brazo.goPose(POSE_TRABAJO_2, 1500)) {
+        Serial.println(F("✓ Completado"));
+      } else {
+        Serial.println(F("✗ Abortado por sobrecarga"));
+      }
       break;
 
     case 'P':  // 'p' minúscula es para poses user, 'P' mayúscula para posiciones
@@ -378,6 +391,11 @@ void processSingleCharCommand(char cmd) {
       Serial.println(F("-> Limpiando errores de todos los motores..."));
       brazo.clearAllErrors();
       Serial.println(F("✓ Completado"));
+      break;
+
+    case 't':
+    case 'T':
+      brazo.printTorqueSnapshot();
       break;
 
     case '\n':
@@ -393,6 +411,45 @@ void processSingleCharCommand(char cmd) {
 }
 
 // Función para mostrar el menú
+void handleEspCommand(uint8_t command) {
+  const uint16_t playtimeMs = 1500;
+  bool ok = false;
+  const char* poseName = "reservado";
+
+  switch (command) {
+    case 0:
+      poseName = "POSE_INICIAL";
+      Serial.println(F("-> POSE_INICIAL"));
+      ok = brazo.goPose(POSE_INICIAL, playtimeMs);
+      break;
+    case 1:
+      poseName = "POSE_TRABAJO";
+      Serial.println(F("-> POSE_TRABAJO"));
+      ok = brazo.goPose(POSE_TRABAJO, playtimeMs);
+      break;
+    case 2:
+      poseName = "POSE_TRABAJO_2";
+      Serial.println(F("-> POSE_TRABAJO_2"));
+      ok = brazo.goPose(POSE_TRABAJO_2, playtimeMs);
+      break;
+    case 3:
+      poseName = "POSE_STANDBY";
+      Serial.println(F("-> POSE_STANDBY"));
+      ok = brazo.goPose(POSE_STANDBY, playtimeMs);
+      break;
+    default:
+      Serial.print(F("-> Comando reservado: "));
+      Serial.println(command);
+      break;
+  }
+
+  if (!ok) {
+    Serial.println(F("✗ Movimiento abortado por sobrecarga"));
+  }
+
+  megaFeedbackSend(command, ok, poseName);
+}
+
 void printMenu() {
   Serial.println(F("Menú de control:"));
   Serial.println(F("  's' - START: Check de motores + ir a posición inicial"));
@@ -400,6 +457,7 @@ void printMenu() {
   Serial.println(F("  '2' - Ir a POSE_TRABAJO"));
   Serial.println(F("  '3' - Ir a POSE_TRABAJO_2"));
   Serial.println(F("  'P' - Mostrar posiciones de todos los motores"));
+  Serial.println(F("  't' - PWM/torque actual (calibrar umbrales)"));
   Serial.println(F("  'c' - Limpiar errores de todos los motores"));
   Serial.println();
   Serial.println(F("Poses del usuario (RAM):"));
@@ -429,11 +487,17 @@ void setup() {
     brazo.motors[i].home = 0;  // Pendiente de calibración
     brazo.motors[i].accelRatio = 0;
     brazo.motors[i].accelTime = 0;
-    brazo.motors[i].pwmThreshold = 0;
   }
 
   // Inicializar comunicación con servos
   brazo.begin();
+  brazo.applySafetyLimits();
+
+  espBridge.begin();
+  espBridge.setHandler(handleEspCommand);
+  megaFeedbackBegin();
+  Serial.println(F("Bridge ESP activo (D5-D8 -> 22/24/26/28, latch D3 -> 44)."));
+  Serial.println(F("Feedback serial Mega TX2 pin16 -> ESP D1 (con divisor)."));
 
   // Mostrar menú inicial
   printMenu();
@@ -451,7 +515,6 @@ void loop() {
     }
   }
 
-  // Pequeño delay para evitar saturación del loop
-  delay(10);
+  espBridge.poll();
 }
 

@@ -1,9 +1,191 @@
 #include "brazo.h"
 #include "poses.h"
+
 // Inicializar comunicación Serial1
 void Brazo::begin() {
   Serial1.begin(115200);
   delay(100);  // Pequeño delay para estabilización
+}
+
+void Brazo::applySafetyLimits() {
+  Serial.println(F("-> Aplicando limites de corriente/torque..."));
+
+  for (uint8_t i = 0; i < NUM_MOTORES; i++) {
+    herkulex_setMaxPWM(motors[i].id, SAFETY_PWM_MAX[i], false);
+    herkulex_setOverloadThreshold(motors[i].id, SAFETY_PWM_OVERLOAD[i], false);
+    motors[i].pwmThreshold = SAFETY_PWM_MONITOR[i];
+
+    Serial.print(F("  Motor ID "));
+    Serial.print(motors[i].id);
+    Serial.print(F(": maxPWM="));
+    Serial.print(SAFETY_PWM_MAX[i]);
+    Serial.print(F(" overload="));
+    Serial.print(SAFETY_PWM_OVERLOAD[i]);
+    Serial.print(F(" monitor="));
+    Serial.println(SAFETY_PWM_MONITOR[i]);
+
+    if (SAFETY_PWM_OVERLOAD[i] > SAFETY_PWM_MAX[i]) {
+      Serial.println(F("  !! overload > max: alarma hardware NO disparara"));
+    }
+    if (SAFETY_PWM_MONITOR[i] >= SAFETY_PWM_OVERLOAD[i]) {
+      Serial.println(F("  !! monitor >= overload: revisar umbrales"));
+    }
+
+    delay(15);
+  }
+
+  Serial.println(F("✓ Limites de seguridad aplicados"));
+}
+
+bool Brazo::checkMotorPwmHigh(uint8_t motorIndex, uint16_t& pwmOut, bool& readOk) {
+  pwmOut = 0;
+  readOk = false;
+
+  uint16_t pwm = 0;
+  if (!herkulex_readPWM(motors[motorIndex].id, pwm)) {
+    return false;
+  }
+
+  readOk = true;
+  pwmOut = pwm;
+  return motors[motorIndex].pwmThreshold > 0 && pwm > motors[motorIndex].pwmThreshold;
+}
+
+bool Brazo::checkMotorStatusError(uint8_t motorIndex) {
+  byte statusError = 0;
+  byte detailError = 0;
+  if (!herkulex_readStatus(motors[motorIndex].id, statusError, detailError)) {
+    return false;
+  }
+
+  if ((statusError & 0x40) || (statusError & ERR_OVERLOAD)) {
+    return true;
+  }
+  // Solo sobre-corriente; el bit stall (0x08) dispara mucho en movimiento normal
+  return (detailError & 0x40) != 0;
+}
+
+bool Brazo::waitAndMonitorMove(uint16_t playtimeMs) {
+  const unsigned long deadline = millis() + playtimeMs + 400;
+  unsigned long lastCheck = 0;
+  uint16_t peakPwm[NUM_MOTORES] = {};
+  uint8_t pwmHits[NUM_MOTORES] = {};
+  uint8_t statusHits[NUM_MOTORES] = {};
+
+  while (millis() < deadline) {
+    if (millis() - lastCheck >= SAFETY_MONITOR_INTERVAL_MS) {
+      lastCheck = millis();
+
+      while (Serial1.available()) {
+        (void)Serial1.read();
+      }
+
+#if SAFETY_DEBUG_PWM
+      Serial.print(F("[MON] "));
+#endif
+
+      for (uint8_t i = 0; i < NUM_MOTORES; i++) {
+        uint16_t pwm = 0;
+        bool readOk = false;
+        const bool pwmHigh = checkMotorPwmHigh(i, pwm, readOk);
+#if SAFETY_USE_STATUS_CHECK
+        const bool statusErr = checkMotorStatusError(i);
+#else
+        const bool statusErr = false;
+#endif
+
+#if SAFETY_DEBUG_PWM
+        Serial.print(motors[i].id);
+        Serial.print(F(":"));
+        if (!readOk) {
+          Serial.print(F("ERR"));
+        } else {
+          Serial.print(pwm);
+        }
+        if (i < NUM_MOTORES - 1) {
+          Serial.print(F(" "));
+        }
+#endif
+
+        if (readOk && pwm > peakPwm[i]) {
+          peakPwm[i] = pwm;
+        }
+
+        if (statusErr) {
+          statusHits[i]++;
+          if (statusHits[i] >= SAFETY_PWM_CONSECUTIVE_HITS) {
+#if SAFETY_DEBUG_PWM
+            Serial.println();
+#endif
+            retreatToStandbyOnOverload(i, pwm);
+            return false;
+          }
+        } else {
+          statusHits[i] = 0;
+        }
+
+        if (readOk) {
+          if (pwmHigh) {
+            pwmHits[i]++;
+            if (pwmHits[i] >= SAFETY_PWM_CONSECUTIVE_HITS) {
+#if SAFETY_DEBUG_PWM
+              Serial.println();
+#endif
+              retreatToStandbyOnOverload(i, pwm);
+              return false;
+            }
+          } else {
+            pwmHits[i] = 0;
+          }
+        }
+
+        delay(3);
+      }
+
+#if SAFETY_DEBUG_PWM
+      Serial.println();
+#endif
+    }
+    delay(2);
+  }
+
+#if SAFETY_DEBUG_PWM
+  Serial.print(F("[MON] pico PWM: "));
+  for (uint8_t i = 0; i < NUM_MOTORES; i++) {
+    Serial.print(motors[i].id);
+    Serial.print(F("="));
+    Serial.print(peakPwm[i]);
+    if (i < NUM_MOTORES - 1) {
+      Serial.print(F(" "));
+    }
+  }
+  Serial.println();
+#endif
+
+  return true;
+}
+
+void Brazo::retreatToStandbyOnOverload(uint8_t motorIndex, uint16_t pwm) {
+  float torque = 0.0f;
+  float current = 0.0f;
+  herkulex_readTorque(motors[motorIndex].id, torque);
+  herkulex_readCurrent(motors[motorIndex].id, current);
+
+  Serial.println();
+  Serial.println(F("⚠️ SOBRECARGA detectada durante movimiento"));
+  Serial.print(F("  Motor ID "));
+  Serial.print(motors[motorIndex].id);
+  Serial.print(F(" PWM="));
+  Serial.print(pwm);
+  Serial.print(F(" torque~"));
+  Serial.print(torque, 2);
+  Serial.print(F(" Nm corriente~"));
+  Serial.print(current, 0);
+  Serial.println(F(" mA"));
+
+  clearAllErrors();
+  Serial.println(F("-> Retirada a POSE_STANDBY por seguridad"));
+  goPose(POSE_STANDBY, SAFETY_RETREAT_MS, false);
 }
 
 // Llenar array con IDs de los motores
@@ -14,7 +196,7 @@ void Brazo::fillIds(uint8_t outIds[NUM_MOTORES]) const {
 }
 
 // Mover brazo a una pose específica
-bool Brazo::goPose(const Pose& pose, uint16_t playtimeMs) {
+bool Brazo::goPose(const Pose& pose, uint16_t playtimeMs, bool safetyMonitor) {
   // Convertir playtime de milisegundos a unidades de 11.2ms
   // playtime = round(playtimeMs / 11.2)
   // Limitar a rango válido: 1-254 (0 no es válido, 255 es reservado)
@@ -46,7 +228,12 @@ bool Brazo::goPose(const Pose& pose, uint16_t playtimeMs) {
   // Pequeño delay después del movimiento para que el comando se procese
   delay(50);
 
-  return true;
+  if (!safetyMonitor) {
+    delay(playtimeMs);
+    return true;
+  }
+
+  return waitAndMonitorMove(playtimeMs);
 }
 
 // Limpiar errores de todos los motores
@@ -169,8 +356,65 @@ void Brazo::printAllPositions() {
   Serial.println(F("=== Fin de posiciones ==="));
 }
 
+void Brazo::printTorqueSnapshot() {
+  Serial.println(F("=== PWM / torque (empujar brazo a mano y repetir 't') ==="));
+  Serial.println(F("ID  PWM  umbral  torque~Nm  mA   status"));
+
+  for (uint8_t i = 0; i < NUM_MOTORES; i++) {
+    while (Serial1.available()) {
+      (void)Serial1.read();
+    }
+
+    const byte id = motors[i].id;
+    uint16_t pwm = 0;
+    float torque = 0.0f;
+    float current = 0.0f;
+    byte statusError = 0;
+    byte detailError = 0;
+
+    const bool pwmOk = herkulex_readPWM(id, pwm);
+    if (pwmOk) {
+      herkulex_readTorque(id, torque);
+      herkulex_readCurrent(id, current);
+    }
+    const bool statusOk = herkulex_readStatus(id, statusError, detailError);
+
+    Serial.print(F(" "));
+    Serial.print(id);
+    Serial.print(F("   "));
+    if (pwmOk) {
+      Serial.print(pwm);
+    } else {
+      Serial.print(F("ERR"));
+    }
+    Serial.print(F("   "));
+    Serial.print(motors[i].pwmThreshold);
+    Serial.print(F("     "));
+    if (pwmOk) {
+      Serial.print(torque, 2);
+      Serial.print(F("      "));
+      Serial.print((int)current);
+    } else {
+      Serial.print(F("-         -"));
+    }
+    Serial.print(F("   "));
+    if (statusOk) {
+      Serial.print(F("0x"));
+      Serial.print(statusError, HEX);
+      Serial.print(F("/0x"));
+      Serial.println(detailError, HEX);
+    } else {
+      Serial.println(F("ERR"));
+    }
+
+    delay(20);
+  }
+
+  Serial.println(F("Regla: MONITOR < OVERLOAD <= MAX (ver brazo_config.h)"));
+}
+
 // Mover brazo a posiciones directamente (sin estructura Pose)
-bool Brazo::goRaw(const uint16_t posiciones[NUM_MOTORES], uint16_t playtimeMs) {
+bool Brazo::goRaw(const uint16_t posiciones[NUM_MOTORES], uint16_t playtimeMs, bool safetyMonitor) {
   // Convertir playtime de milisegundos a unidades de 11.2ms
   float playtimeFloat = (float)playtimeMs / 11.2f;
   if (playtimeFloat < 1.0f) playtimeFloat = 1.0f;
@@ -199,7 +443,12 @@ bool Brazo::goRaw(const uint16_t posiciones[NUM_MOTORES], uint16_t playtimeMs) {
   // Pequeño delay después del movimiento para que el comando se procese
   delay(50);
 
-  return true;
+  if (!safetyMonitor) {
+    delay(playtimeMs);
+    return true;
+  }
+
+  return waitAndMonitorMove(playtimeMs);
 }
 
 // Activar torque de todos los motores
