@@ -414,6 +414,7 @@ void processSingleCharCommand(char cmd) {
 void handleEspCommand(uint8_t command) {
   const uint16_t playtimeMs = 1500;
   bool ok = false;
+  bool checkFailed = false;
   const char* poseName = "reservado";
 
   switch (command) {
@@ -437,13 +438,39 @@ void handleEspCommand(uint8_t command) {
       Serial.println(F("-> POSE_STANDBY"));
       ok = brazo.goPose(POSE_STANDBY, playtimeMs);
       break;
+    case 4:
+      // START: check de motores + ir a posición inicial (mismo flujo que 's' por Serial)
+      poseName = "START";
+      Serial.println(F("-> START: check de motores..."));
+      if (brazo.checkAll()) {
+        Serial.println(F("-> Moviendo a POSE_INICIAL..."));
+        delay(500);
+        ok = brazo.goPose(POSE_INICIAL, playtimeMs);
+        if (ok) {
+          Serial.println(F("✓ Brazo en posición inicial"));
+        }
+      } else {
+        poseName = "CHECK_FAIL";
+        checkFailed = true;
+        Serial.println(F("⚠️ Check falló. Revisar motores antes de continuar."));
+      }
+      break;
+    case 5:
+      // Limpiar errores de todos los motores (mismo flujo que 'c' por Serial)
+      poseName = "CLEAR_ERRORS";
+      Serial.println(F("-> Limpiando errores de todos los motores..."));
+      brazo.clearAllErrors();
+      ok = true;
+      Serial.println(F("✓ Errores limpiados"));
+      break;
     default:
       Serial.print(F("-> Comando reservado: "));
       Serial.println(command);
-      break;
+      megaFeedbackSend(command, false, poseName);
+      return;
   }
 
-  if (!ok) {
+  if (!ok && !checkFailed) {
     Serial.println(F("✗ Movimiento abortado por sobrecarga"));
   }
 

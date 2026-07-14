@@ -27,6 +27,8 @@ MEGA_CMD_MAP = {
     1: "Trabajo",
     2: "Trabajo 2",
     3: "Standby",
+    4: "Start / Check",
+    5: "Clear errors",
 }
 
 CMD_LABELS = {i: (MEGA_CMD_MAP[i] if i in MEGA_CMD_MAP else f"Cmd {i}") for i in range(16)}
@@ -242,7 +244,8 @@ HTML = """<!DOCTYPE html>
 
   <script>
     const CMD_LABELS = {
-      0: "Inicial", 1: "Trabajo", 2: "Trabajo 2", 3: "Standby"
+      0: "Inicial", 1: "Trabajo", 2: "Trabajo 2", 3: "Standby",
+      4: "Start / Check", 5: "Clear errors"
     };
     let lastSent = null;
 
@@ -258,7 +261,7 @@ HTML = """<!DOCTYPE html>
       const grid = document.getElementById("cmdGrid");
       for (let cmd = 0; cmd <= 15; cmd++) {
         const btn = document.createElement("button");
-        btn.className = "cmd-btn" + (cmd <= 3 ? " named" : "");
+        btn.className = "cmd-btn" + (cmd <= 5 ? " named" : "");
         btn.dataset.cmd = cmd;
         btn.innerHTML =
           '<span class="cmd-num">CMD ' + cmd + '</span>' +

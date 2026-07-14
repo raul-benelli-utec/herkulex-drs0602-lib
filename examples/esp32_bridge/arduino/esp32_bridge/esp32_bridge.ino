@@ -38,6 +38,8 @@ static const char* megaPoseName(uint8_t cmd) {
     case 1: return "POSE_TRABAJO";
     case 2: return "POSE_TRABAJO_2";
     case 3: return "POSE_STANDBY";
+    case 4: return "START";
+    case 5: return "CLEAR_ERRORS";
     default: return "reservado";
   }
 }

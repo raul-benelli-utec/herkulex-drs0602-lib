@@ -108,6 +108,18 @@ pio run -e esp32dev -t upload
 
 Subir `examples/proyecto_cobot/` (incluye `esp_bridge` integrado).
 
+## Comandos (bus paralelo 0–15)
+
+| Cmd | Acción en Mega |
+|-----|----------------|
+| 0 | Ir a POSE_INICIAL |
+| 1 | Ir a POSE_TRABAJO |
+| 2 | Ir a POSE_TRABAJO_2 |
+| 3 | Ir a POSE_STANDBY |
+| 4 | **START**: check de motores + ir a POSE_INICIAL (equivale a `s` por Serial) |
+| 5 | **Clear errors**: limpia errores de todos los motores (equivale a `c` por Serial) |
+| 6–15 | Reservados |
+
 ## API (por si querés extender)
 
 | Método | Ruta | Descripción |
